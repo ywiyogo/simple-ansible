@@ -1,0 +1,93 @@
+#######################
+# Initial Server Setup
+#######################
+---
+- hosts: worker
+  become: true
+  vars_files:
+    - vars/default.yml
+  tasks:
+    - name: Install Prerequisites
+      apt:
+        name: aptitude
+        update_cache: yes
+        state: latest
+        force_apt_get: yes
+
+    - name: Install sudo
+      apt:
+        name: sudo
+
+    - name: Check if user exists
+      shell: /usr/bin/getent passwd | awk -F":" '{print $1}'
+      register: etc_groups
+
+    - name: Creating user "{{ create_user }}" with admin access
+      user:
+        name: "{{ create_user }}"
+        password: "{{ upasswd | password_hash('sha512') }}"
+        state: present
+        groups: sudo
+        append: true
+        create_home: true
+      when: '"{{create_user}}" in etc_groups.stdout_lines'
+
+    - name: Allow sudo to have passwordless sudo
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: "^%sudo"
+        line: "%sudo ALL=(ALL) NOPASSWD: ALL"
+        validate: "/usr/sbin/visudo -cf %s"
+
+    - name: Setup authorized key for remote user
+      authorized_key:
+        user: "{{ create_user }}"
+        state: present
+        key: "{{ copy_local_key }}"
+      when: '"{{create_user}}" in etc_groups.stdout_lines'
+    # SSH setup
+    - name: Disable password authentication for root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: "^#?PermitRootLogin"
+        line: "PermitRootLogin prohibit-password"
+      register: sshconfig
+
+    - name: Disable password login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        regexp: "#?.*PasswordAuthentication.*"
+        line: "PasswordAuthentication no"
+      register: sshconfig
+
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
+      when: sshconfig.changed
+
+    # Install Packages
+    - name: Run the equivalent of "apt-get update" as a separate step
+      apt:
+        update_cache: yes
+
+    - name: Install required system packages
+      apt:
+        name: "{{ sys_packages }}"
+        state: latest
+
+    - name: Setup UFW - Allow SSH connections
+      ufw:
+        rule: allow
+        name: OpenSSH
+    - name: UFW - Deny all other incoming traffic by default
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+    - name: Installing k3sup
+    - command: "curl -sLS https://get.k3sup.dev | sudo sh"
