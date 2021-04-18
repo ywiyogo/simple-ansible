@@ -2,11 +2,15 @@
 # Initial Server Setup
 #######################
 ---
-- hosts: worker
+- hosts: kubernetes
   become: true
   vars_files:
     - vars/default.yml
-  tasks:
+  vars:
+    master_ip1: "{{hostvars['conta-de1']['ansible_default_ipv4']['address']}}"
+    master_ip2: "{{hostvars['conta-us1']['ansible_default_ipv4']['address']}}"
+    docker_arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64'}}"
+  tasks:      
     - name: Install Prerequisites
       apt:
         name: aptitude
@@ -30,6 +34,7 @@
         groups: sudo
         append: true
         create_home: true
+        shell: /bin/bash
       when: '"{{create_user}}" in etc_groups.stdout_lines'
 
     - name: Allow sudo to have passwordless sudo
@@ -46,8 +51,9 @@
         state: present
         key: "{{ copy_local_key }}"
       when: '"{{create_user}}" in etc_groups.stdout_lines'
-    # SSH setup
-    - name: Disable password authentication for root login
+    
+      # SSH setup
+    - name: Disable password authentication for root login in SSH
       lineinfile:
         path: /etc/ssh/sshd_config
         state: present
@@ -70,24 +76,56 @@
       when: sshconfig.changed
 
     # Install Packages
-    - name: Run the equivalent of "apt-get update" as a separate step
-      apt:
-        update_cache: yes
-
     - name: Install required system packages
       apt:
         name: "{{ sys_packages }}"
         state: latest
+    - name: Check for docker binary
+      stat:
+        path: /usr/bin/docker
+      register: dockerbin
 
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/{{ansible_os_family | lower}}/gpg
+        state: present
+      when: not dockerbin.stat.exists
+    - name: Add Docker Repository
+      apt_repository:
+        repo: "deb [arch={{docker_arch}}] https://download.docker.com/linux/{{ansible_os_family| lower}} {{ansible_distribution_release | lower}} stable"
+        state: present
+      when: not dockerbin.stat.exists
+    - name: Install Docker
+      apt:
+        name: "{{ docker_packages }}"
+        state: latest
+      when: not dockerbin.stat.exists
+    
     - name: Setup UFW - Allow SSH connections
       ufw:
         rule: allow
         name: OpenSSH
+    - name: Setup UFW - Allow 443/tcp connections
+      ufw:
+        rule: allow
+        port: "443"
+        proto: tcp
+        comment: For HTTPS and k3s (SSL/TLS)
+    - name: Setup UFW - Allow 6443/tcp connections
+      ufw:
+        rule: allow
+        port: "6443"
+        proto: tcp
+        comment: For k3s
+    - name: Setup UFW - Allow  8472/udp connections
+      ufw:
+        rule: allow
+        port: "8472"
+        proto: udp
+        comment: For k3s
     - name: UFW - Deny all other incoming traffic by default
       ufw:
         state: enabled
         policy: deny
         direction: incoming
-
-    - name: Installing k3sup
-    - command: "curl -sLS https://get.k3sup.dev | sudo sh"
+      when: "'nanopim4v2' not in group_names"
