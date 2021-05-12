@@ -2,7 +2,7 @@
 # Initial Server Setup
 #######################
 ---
-- hosts: kubernetes
+- hosts: vps
   become: true
   vars_files:
     - vars/default.yml
@@ -22,7 +22,7 @@
       apt:
         name: sudo
 
-    - name: Check if user exists
+    - name: Listing the existing users
       shell: /usr/bin/getent passwd | awk -F":" '{print $1}'
       register: etc_groups
 
@@ -35,7 +35,8 @@
         append: true
         create_home: true
         shell: /bin/bash
-      when: '"{{create_user}}" in etc_groups.stdout_lines'
+      register: new_user_created
+      when: '"{{create_user}}" not in etc_groups.stdout_lines'
 
     - name: Allow sudo to have passwordless sudo
       lineinfile:
@@ -44,13 +45,14 @@
         regexp: "^%sudo"
         line: "%sudo ALL=(ALL) NOPASSWD: ALL"
         validate: "/usr/sbin/visudo -cf %s"
+      when: new_user_created.changed
 
-    - name: Setup authorized key for remote user
+    - name: Setup authorized public key for the new remote user
       authorized_key:
         user: "{{ create_user }}"
         state: present
         key: "{{ copy_local_key }}"
-      when: '"{{create_user}}" in etc_groups.stdout_lines'
+      when: ('"{{create_user}}" in etc_groups.stdout_lines') or (new_user_created.changed)
     
       # SSH setup
     - name: Disable password authentication for root login in SSH
@@ -58,14 +60,15 @@
         path: /etc/ssh/sshd_config
         state: present
         regexp: "^#?PermitRootLogin"
-        line: "PermitRootLogin prohibit-password"
+        line: "PermitRootLogin no"
       register: sshconfig
+      when: new_user_created.changed
 
     - name: Disable password login
       lineinfile:
         path: /etc/ssh/sshd_config
         state: present
-        regexp: "#?.*PasswordAuthentication.*"
+        regexp: "#?.*PasswordAuthentication yes"
         line: "PasswordAuthentication no"
       register: sshconfig
 
@@ -80,6 +83,11 @@
       apt:
         name: "{{ sys_packages }}"
         state: latest
+    - name: Install required system packages for docker
+      apt:
+        name: "{{ docker_sys_packages }}"
+        state: latest
+    
     - name: Check for docker binary
       stat:
         path: /usr/bin/docker
@@ -101,16 +109,38 @@
         state: latest
       when: not dockerbin.stat.exists
     
-    - name: Setup UFW - Allow SSH connections
+    - name: adding existing user '{{ create_user }}' to group docker
+      user:
+        name: '{{ create_user }}'
+        groups: docker
+        append: yes
+      become: yes
+      when: ('"{{create_user}}" in etc_groups.stdout_lines') or (new_user_created.changed)
+
+    - name: Setup UFW - Allow 22/tcp connections
       ufw:
         rule: allow
-        name: OpenSSH
-    - name: Setup UFW - Allow 443/tcp connections
-      ufw:
-        rule: allow
-        port: "443"
+        port: "22"
         proto: tcp
-        comment: For HTTPS and k3s (SSL/TLS)
+        comment: "SSH"
+    
+    - name: UFW - Deny all other incoming traffic by default
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+      when: "'nanopim4v2' not in group_names"
+
+    - name: Reboot the machine with all defaults
+      reboot:
+
+
+- hosts: kubernetes
+  tasks:
+    - name: Install required system packages for Kubernetes
+      apt:
+        name: "{{ kubernetes_packages }}"
+        state: latest
     - name: Setup UFW - Allow 6443/tcp connections
       ufw:
         rule: allow
@@ -123,9 +153,3 @@
         port: "8472"
         proto: udp
         comment: For k3s
-    - name: UFW - Deny all other incoming traffic by default
-      ufw:
-        state: enabled
-        policy: deny
-        direction: incoming
-      when: "'nanopim4v2' not in group_names"
